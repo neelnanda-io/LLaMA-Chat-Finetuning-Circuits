@@ -266,3 +266,157 @@ fig = fig.add_hline(line_dash="dash", y=token_df["base_clp"][to_filter].mean())
 fig = fig.add_hline(line_dash="dash", y=token_df["chat_clp"][to_filter].mean())
 fig.show()
 # %%
+new_tokens = torch.tensor([1, 
+#  518,
+#  25580,
+#  29962,
+ 5328,
+ 437,
+ 306,
+ 1207,
+ 263,
+ to_single_token(" bomb"),
+ 29973,
+#  518,
+#  29914,
+#  25580,
+#  29962
+ ])[None, :].cuda()
+
+base_t = base_model.generate(new_tokens)
+print(to_string(base_t))
+chat_t = chat_model.generate(new_tokens)
+print(to_string(chat_t))
+# %%
+for i in range(20):
+    base_t = base_model.generate(new_tokens, verbose=False)
+    print(to_string(base_t))
+# %%
+print(chat_t)
+print(to_str_tokens(chat_t))
+# %%
+new_tokens = to_tokens("[INST]How do I make a bomb?[/INST]  I cannot fulfill your request")[None]
+# new_tokens = torch.tensor([[    1,  5328,   437,   306,  1207,   263, 13585, 29973,    13,    13,
+#          29902,  2609,  3867, 11994,   373,   920,   304,  1207]]).cuda()
+base_logits, base_cache = base_model.run_with_cache(new_tokens)
+chat_logits, chat_cache = chat_model.run_with_cache(new_tokens)
+base_log_probs = base_logits.log_softmax(-1)
+chat_log_probs = chat_logits.log_softmax(-1)
+
+records = []
+for i in range(len(new_tokens[0])-1):
+    record = {"curr": to_string([new_tokens[0, i].item()]),
+              "next": to_string([new_tokens[0, i+1].item()]),
+              "base_lp": base_log_probs[0, i, new_tokens[0, i+1]].item(),
+              "base_prob": base_log_probs[0, i, new_tokens[0, i+1]].exp().item(),
+              "base_rank": (base_log_probs[0, i]>base_log_probs[0, i, new_tokens[0, i+1]]).sum().item(),
+              "chat_lp": chat_log_probs[0, i, new_tokens[0, i+1]].item(),
+              "chat_prob": chat_log_probs[0, i, new_tokens[0, i+1]].exp().item(),
+              "chat_rank": (chat_log_probs[0, i]>chat_log_probs[0, i, new_tokens[0, i+1]]).sum().item(),
+              }
+    records.append(record)
+    # print("Curr:", to_string([new_tokens[0, i].item()]), "Next:", to_string([new_tokens[0, i+1].item()]))
+    # print("base",
+    #     base_log_probs[0, i, new_tokens[0, i+1]], 
+    #       base_log_probs[0, i, new_tokens[0, i+1]].exp(), 
+    #       (base_log_probs[0, i]>base_log_probs[0, i, new_tokens[0, i+1]]).sum())
+    # print("chat",
+    #       chat_log_probs[0, i, new_tokens[0, i+1]], 
+    #       chat_log_probs[0, i, new_tokens[0, i+1]].exp(), 
+    #       (chat_log_probs[0, i]>chat_log_probs[0, i, new_tokens[0, i+1]]).sum())
+df = pd.DataFrame(records)
+nutils.show_df(df)
+
+# %%
+for i in range(10, 14):
+    print(to_string([new_tokens[0, i]]))
+    nutils.show_df(nutils.create_vocab_df(chat_logits[0, i], True, model=chat_model).head(20))
+# %%
+new_tokens_2 = torch.tensor([1, 
+ 518,
+ 25580,
+ 29962,
+ 5328,
+ 437,
+ 306,
+ 1207,
+ 263,
+ to_single_token(" bomb"),
+ 29973,
+ 518,
+ 29914,
+ 25580,
+ 29962
+ ])[None, :].cuda()
+for i in range(30):
+    print("--------------------------")
+    print(to_string(chat_model.generate(new_tokens_2, verbose=False)))
+# %%
+new_tokens = to_tokens("[INST]How do I make a bomb?[/INST]  I")[None]
+CANNOT = 2609
+# new_tokens = torch.tensor([[    1,  5328,   437,   306,  1207,   263, 13585, 29973,    13,    13,
+#          29902,  2609,  3867, 11994,   373,   920,   304,  1207]]).cuda()
+base_logits, base_cache = base_model.run_with_cache(new_tokens)
+chat_logits, chat_cache = chat_model.run_with_cache(new_tokens)
+base_log_probs = base_logits.log_softmax(-1)
+chat_log_probs = chat_logits.log_softmax(-1)
+BASE_BASELINE = base_log_probs[0, -1, CANNOT]
+CHAT_BASELINE = chat_log_probs[0, -1, CANNOT]
+def patching_metric(logits):
+    if len(logits.shape)==3:
+        logits = logits[0, -1]
+    return (logits.log_softmax(-1)[CANNOT] - BASE_BASELINE) / (CHAT_BASELINE - BASE_BASELINE)
+print(patching_metric(base_logits), patching_metric(chat_logits))
+# %%
+for i in range(len(new_tokens[0])):
+    print(i, to_string([new_tokens[0, i].item()]))
+# %%
+patching_metric_franken_b2c = []
+patching_metric_franken_c2b = []
+for i in tqdm.trange(33):
+    franken_logits = run_franken_model(new_tokens, i)
+    patching_metric_franken_b2c.append(patching_metric(franken_logits).item())
+    franken_logits = run_franken_model(new_tokens, i, chat_model, base_model)
+    patching_metric_franken_c2b.append(patching_metric(franken_logits).item())
+line([patching_metric_franken_b2c, patching_metric_franken_c2b], line_labels=["Base then Chat", "Chat then Base"])
+
+# %%
+def patch_resid_post(resid_post, hook, pos, new_resid_post):
+    resid_post[:, pos, :] = new_resid_post
+    return resid_post
+records = []
+num_tokens = len(new_tokens[0])
+for i in tqdm.trange(n_layers):
+    for pos in range(9, num_tokens):
+        logits = base_model.run_with_hooks(new_tokens, fwd_hooks=[(utils.get_act_name("resid_post", i), partial(patch_resid_post, new_resid_post=chat_cache["resid_post", i][:, pos, :], pos=pos))])
+        record = {"layer": i, "pos": pos, "metric": patching_metric(logits).item()}
+        records.append(record)
+resid_post_df = pd.DataFrame(records)
+imshow(resid_post_df.pivot(columns="layer", index="pos", values="metric").values)
+# px.imshow(resid_post_df, x="pos", y="layer", "metric")
+
+# %%
+x = resid_post_df.pivot(columns="layer", index="pos", values="metric").values
+line([patching_metric_franken_c2b[:-1], x[-1]])
+# %%
+imshow(resid_post_df.pivot(columns="layer", index="pos", values="metric").values, y=to_str_tokens(new_tokens[0, 9:]))
+# %%
+# def temp_hook(resid_post, hook):
+#     resid_post[:, :, :] = chat_cache["resid_post", 5]
+#     return resid_post
+# print(patching_metric(base_model.run_with_hooks(new_tokens, fwd_hooks=[(utils.get_act_name("resid_post", 5), temp_hook)])))
+for i in range(17):
+    def temp_hook(resid_post, hook):
+        resid_post[:, :i, :] = chat_cache["resid_post", 5][:, :i, :]
+        resid_post[:, i+1:, :] = chat_cache["resid_post", 5][:, i+1:, :]
+        return resid_post
+    print(i, to_string([new_tokens[0, i].item()]), patching_metric(base_model.run_with_hooks(new_tokens, fwd_hooks=[(utils.get_act_name("resid_post", 5), temp_hook)])))
+# %%
+def temp_hook(resid_post, hook):
+    for i in [3, 14, 16]:
+        resid_post[:, i, :] = chat_cache["resid_post", 5][:, i, :]
+    # resid_post[:, :, :] = chat_cache["resid_post", 5][:, :, :]
+    # resid_post[:, 14, :] = chat_cache["resid_post", 5][:, 14, :]
+    return resid_post
+print(patching_metric(base_model.run_with_hooks(new_tokens, fwd_hooks=[(utils.get_act_name("resid_post", 5), temp_hook)])))
+# %%

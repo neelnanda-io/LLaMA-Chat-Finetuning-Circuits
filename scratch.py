@@ -200,6 +200,69 @@ data = load_dataset("NeelNanda/pile-10k", split='train')
 tokenized_data = utils.tokenize_and_concatenate(data, tokenizer, max_length=256)
 tokenized_data = tokenized_data.shuffle(44)
 # %%
-batch_size = 4
+def run_franken_model(tokens, layer, model1=base_model, model2=chat_model):
+    residual = model1.embed(tokens)
+    for l in range(layer):
+        residual = model1.blocks[l](residual)
+
+    for l in range(layer, n_layers):
+        residual = model2.blocks[l](residual)
+    franken_logits = model2.unembed(model2.ln_final(residual))
+    return franken_logits
+# %%
+batch_size = 16
 layer = 28
-tokens = tokenized_data[:batch_size]
+tokens = tokenized_data[:batch_size]["tokens"]
+
+model1 = base_model
+model2 = chat_model
+
+franken_logits = run_franken_model(tokens, layer)
+
+base_logits = base_model(tokens)
+chat_logits = chat_model(tokens)
+
+print("Base loss", base_model.loss_fn(base_logits, tokens))
+print("chat loss", chat_model.loss_fn(chat_logits, tokens))
+print("franken loss", base_model.loss_fn(franken_logits, tokens))
+# %%
+base_clp = base_model.loss_fn(base_logits, tokens, per_token=True)
+chat_clp = base_model.loss_fn(chat_logits, tokens, per_token=True)
+franken_clp = base_model.loss_fn(franken_logits, tokens, per_token=True)
+
+# %%
+# old_str_tokens = base_model.to_str_tokens
+# base_model.to_str_tokens = to_str_tokens
+# nutils.make_token_df(tokens, model=base_model)
+# %%
+token_df = nutils.make_token_df(tokens, model=base_model, len_prefix=10, len_suffix=3)
+token_df = token_df[token_df.pos < token_df.pos.max()]
+token_df["base_clp"] = to_numpy(base_clp.flatten())
+token_df["chat_clp"] = to_numpy(chat_clp.flatten())
+token_df["franken_clp"] = to_numpy(franken_clp.flatten())
+token_df["base_chat_diff"] = token_df["base_clp"] - token_df["chat_clp"]
+token_df.sort_values("base_chat_diff", ascending=False).head(20)
+# %%
+px.scatter(token_df, x="base_clp", y="chat_clp", color="franken_clp", color_continuous_scale='Portland', hover_name="context")
+# %%
+temp_logits = chat_model("-2 Luton Town 13-2")
+temp_log_probs = temp_logits.log_softmax(-1)[0, -1]
+temp_df = nutils.create_vocab_df(temp_log_probs, model=base_model, make_probs=True)
+temp_df.loc[to_single_token(" Draw")]
+# %%
+to_filter = (token_df["base_clp"]<12.) & (token_df["chat_clp"]<12.).values
+new_loss_b2c = []
+new_loss_c2b = []
+for layer in tqdm.trange(0, n_layers+1):
+    new_franken_logits_b2c = run_franken_model(tokens, layer)
+    new_franken_logits_c2b = run_franken_model(tokens, layer, chat_model, base_model)
+    new_loss_b2c.append(to_numpy(base_model.loss_fn(new_franken_logits_b2c, tokens, per_token=True).flatten())[to_filter].mean().item())
+    new_loss_c2b.append(to_numpy(base_model.loss_fn(new_franken_logits_c2b, tokens, per_token=True).flatten())[to_filter].mean().item())
+line([new_loss_b2c, new_loss_c2b])
+# %%
+
+fig = line([new_loss_b2c, new_loss_c2b], line_labels=["Base then Chat", "Chat then Base"], return_fig=True, xaxis="Layer", yaxis="Loss", title="Loss of Franken Model by Layer at Which We Switch")
+fig = fig.add_hline(line_dash="dash", y=token_df["base_clp"][to_filter].mean())
+fig = fig.add_hline(line_dash="dash", y=token_df["chat_clp"][to_filter].mean())
+fig.show()
+# %%
